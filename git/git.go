@@ -32,6 +32,47 @@ func smartJoin(path, relPath string) string {
 	return filepath.Join(path, relPath)
 }
 
+// GitDir gets repo's git-dir
+func GitDir(gitbin, path string) (string, error) {
+	cmd := exec.Command(gitbin, "-C", path, "rev-parse", "--git-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		switch err := err.(type) {
+		case *exec.Error:
+			return "", fmt.Errorf(
+				"could not run '%s': %w", gitbin, err.Err,
+			)
+		case *exec.ExitError:
+			return "", fmt.Errorf(
+				"git rev-parse failed: %s", err.Stderr,
+			)
+		default:
+			return "", err
+		}
+	}
+	gitDir := smartJoin(path, string(bytes.TrimSpace(out)))
+
+	return gitDir, nil
+}
+
+// IsShallow checks if a repo is shallow clone
+func IsShallow(gitbin, gitdir string) (bool, error) {
+	cmd := exec.Command(gitbin, "rev-parse", "--git-path", "shallow")
+	cmd.Dir = gitdir
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf(
+			"could not run 'git rev-parse --git-path shallow': %w", err,
+		)
+	}
+	shallow := smartJoin(gitdir, string(bytes.TrimSpace(out)))
+	_, err = os.Lstat(shallow)
+	if err == nil {
+		return true, errors.New("this appears to be a shallow clone; full clone required")
+	}
+	return false, nil
+}
+
 // NewRepository creates a new repository object that can be used for
 // running `git` commands within that repository.
 func NewRepository(path string) (*Repository, error) {
@@ -42,42 +83,16 @@ func NewRepository(path string) (*Repository, error) {
 			"could not find 'git' executable (is it in your PATH?): %w", err,
 		)
 	}
-
-	//nolint:gosec // `gitBin` is chosen carefully, and `path` is the
-	// path to the repository.
-	cmd := exec.Command(gitBin, "-C", path, "rev-parse", "--git-dir")
-	out, err := cmd.Output()
+	// Find git dir
+	gitDir, err := GitDir(gitBin, path)
 	if err != nil {
-		switch err := err.(type) {
-		case *exec.Error:
-			return nil, fmt.Errorf(
-				"could not run '%s': %w", gitBin, err.Err,
-			)
-		case *exec.ExitError:
-			return nil, fmt.Errorf(
-				"git rev-parse failed: %s", err.Stderr,
-			)
-		default:
-			return nil, err
-		}
+		return nil, err
 	}
-	gitDir := smartJoin(path, string(bytes.TrimSpace(out)))
-
-	//nolint:gosec // `gitBin` is chosen carefully.
-	cmd = exec.Command(gitBin, "rev-parse", "--git-path", "shallow")
-	cmd.Dir = gitDir
-	out, err = cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf(
-			"could not run 'git rev-parse --git-path shallow': %w", err,
-		)
+	// Check if the repo is a shallow clone
+	shallow, err := IsShallow(gitBin, gitDir)
+	if shallow {
+		return nil, err
 	}
-	shallow := smartJoin(gitDir, string(bytes.TrimSpace(out)))
-	_, err = os.Lstat(shallow)
-	if err == nil {
-		return nil, errors.New("this appears to be a shallow clone; full clone required")
-	}
-
 	return &Repository{
 		path:   gitDir,
 		gitBin: gitBin,
